@@ -1,5 +1,54 @@
+import logging
+import time
+
 from playwright.sync_api import Playwright, TimeoutError as PlaywrightTimeout
+
 from model.job import Job
+
+
+unstop_logger = logging.getLogger("scraper.unstop")
+internshala_logger = logging.getLogger("scraper.internshala")
+naukri_logger = logging.getLogger("scraper.naukri")
+glassdoor_logger = logging.getLogger("scraper.glassdoor")
+
+MAX_LOAD_ATTEMPTS = 5
+RETRY_DELAY_SECONDS = 3
+
+
+def _load_until_visible(
+    page,
+    url: str,
+    selector: str,
+    logger: logging.Logger,
+    label: str,
+    *,
+    timeout: int = 20000,
+) -> bool:
+    for attempt in range(1, MAX_LOAD_ATTEMPTS + 1):
+        try:
+            page.goto(url)
+            page.wait_for_selector(selector, state="visible", timeout=timeout)
+            if attempt > 1:
+                logger.info("%s loaded on attempt %s", label, attempt)
+            return True
+        except PlaywrightTimeout:
+            logger.warning(
+                "%s attempt %s/%s timed out; retrying",
+                label,
+                attempt,
+                MAX_LOAD_ATTEMPTS,
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.warning(
+                "%s attempt %s/%s failed: %s",
+                label,
+                attempt,
+                MAX_LOAD_ATTEMPTS,
+                exc,
+            )
+        time.sleep(RETRY_DELAY_SECONDS)
+    logger.error("Unable to load %s after %s attempts", label, MAX_LOAD_ATTEMPTS)
+    return False
 
 
 def fetch_unstop(playwright:Playwright):
@@ -8,120 +57,189 @@ def fetch_unstop(playwright:Playwright):
     chromium = playwright.chromium
     browser = chromium.launch(headless=False)
     page = browser.new_page()
-    page.goto(addr)
-    page.wait_for_load_state('networkidle')
+    if not _load_until_visible(
+        page,
+        addr,
+        "a.item.position-relative",
+        unstop_logger,
+        "Unstop job cards",
+        timeout=30000,
+    ):
+        browser.close()
+        return []
 
     jobs = []  # Store all jobs
-    print("----- It's unstop love -----")
+    unstop_logger.info("========== UNSTOP SCRAPE START ==========")
+    blocks = page.locator("a.item.position-relative").all()
+    if not blocks:
+        unstop_logger.warning("Unstop returned 0 blocks; page structure might have changed")
+    for block in blocks:
+        link = block.get_attribute("href")
+        if not link:
+            continue
+        content = block.locator("div.cptn")
+        sections = content.locator("div").all()
+        if len(sections) < 2:
+            continue
 
-    while True:
-        
-        blocks = page.locator("a.item.position-relative").all()
-        for block in blocks:
-            link = block.get_attribute("href")
-            if link != None:
-                content = block.locator("div.cptn")
-                c = content.locator("div").all()
-                if(len(c)==0):
-                    continue
-                companyName = content.locator("p.single-wrap").text_content()
-                print(content.all_inner_texts())
-                title = c[0].text_content()
-                requirements = c[1].locator("div").all()
-                experience = requirements[0].text_content()
-                clocking = requirements[1].text_content()
-                if len(requirements) != 3:
-                    location = "Remote"
-                else:    
-                    location = requirements[2].text_content()
-                skills = content.locator("div.center-bullet.ng-star-inserted").all_inner_texts()
-                if len(skills) > 0:
-                    skills = skills[0].split("\n")
-                job = Job(company=companyName, title=title, redirectLink=base_url+link, qualifications=skills, location=location, duration="", basedJob=clocking, experience=experience)
-                jobs.append(job) 
-        print(f"Number of Jobs: {str(len(jobs))}") # Store the job
-        page.locator("li.right-arrow.num.arrow.waves_effect:not(.ng-star-inserted)").click()
-        
-        # Wait for the skeleton to disappear and actual content to load
-        #this line waits for the loading page to hide.
-        page.wait_for_selector("app-global-skeleton", state="hidden", timeout=30000)
-        # Also wait for the job cards to be visible
-        #this line waits for the job cards to appear.
-        page.wait_for_selector("div.panel_container a", state="visible", timeout=30000)
-        page.wait_for_load_state("networkidle")
-        endPage = page.locator("div.push-left.ng-star-inserted").all_text_contents()[0]
-        endPage = endPage.split(" ")
-        #ending page looks like this : ['', '55', '-', '72', '', '/', '115']
-        if endPage[3] == endPage[6]:
-            page.close()
-            browser.close()
-            break
-        print(f"----- Parsing Complete: {len(jobs)} jobs found -----")
+        company_name = content.locator("p.single-wrap").text_content().strip()
+        title = sections[0].text_content().strip()
+
+        requirement_nodes = sections[1].locator("div").all()
+        requirement_text = [req.text_content().strip() for req in requirement_nodes if req.text_content()]
+        remaining = requirement_text.copy()
+
+        def _extract(predicate) -> str | None:
+            for idx, text in enumerate(remaining):
+                if predicate(text.lower()):
+                    return remaining.pop(idx)
+            return None
+
+        experience = _extract(lambda t: "experience" in t) or (
+            remaining.pop(0) if remaining else "Experience not listed"
+        )
+
+        schedule_keywords = (
+            "full time",
+            "part time",
+            "contract",
+            "hybrid",
+            "internship",
+            "on field",
+        )
+        clocking = _extract(lambda t: any(k in t for k in schedule_keywords)) or (
+            remaining.pop(0) if remaining else "Schedule not listed"
+        )
+
+        duration_keywords = ("month", "week", "day", "duration", "year")
+        duration = _extract(lambda t: any(k in t for k in duration_keywords)) or "Duration not listed"
+
+        location_keywords = (
+            "remote",
+            "office",
+            "hybrid",
+            "online",
+            "onsite",
+            "on-site",
+            "india",
+        )
+        location = _extract(lambda t: any(k in t for k in location_keywords)) or (
+            remaining.pop(0) if remaining else "Remote"
+        )
+
+        skills_text = content.locator("div.center-bullet.ng-star-inserted").all_inner_texts()
+        skills = []
+        if skills_text:
+            skills = [skill.strip() for skill in skills_text[0].split("\n") if skill.strip()]
+
+        job = Job(
+            company=company_name,
+            title=title,
+            redirectLink=base_url + link,
+            qualifications=skills,
+            location=location,
+            duration=duration,
+            basedJob=clocking,
+            experience=experience,
+        )
+        jobs.append(job)
+        unstop_logger.info("- %s @ %s | %s", title, company_name, location)
+
+    unstop_logger.info("========== UNSTOP SCRAPE END | %s jobs ==========", len(jobs))
+    page.close()
     browser.close()
 
     return jobs
 
 #TODO: To Include Pagination in This.
 
-def fetch_internshala(playWright:Playwright):
-    ##phir btc pagination mein dikkat iski ma ka !!!
+def fetch_internshala(playWRight:Playwright):
     addr = "https://internshala.com/internships/work-from-home-ai-agent-development,android-app-development,angular-js-development,artificial-intelligence-ai,backend-development,cloud-computing,computer-science,computer-vision,cyber-security,data-science,web-development,ios-app-development-internships/part-time-true/"
     base_url = "https://internshala.com"
-    chromium = playWright.chromium
-    browser = chromium.launch(headless=False)
-    pg = 1
+    chromium = playWRight.chromium
+    browser = chromium.launch(headless=True)
     page = browser.new_page()
-    page.goto(addr)
-    try:
-        page.wait_for_load_state("networkidle", timeout=45000)
-    except PlaywrightTimeout:
-        print("[Glassdoor] networkidle wait timed out, continuing with available content")
-    model_subs = page.locator("div.modal.subscription_alert.new.show")
+    page.set_default_timeout(20000)
+
+    resource_blocklist = {"image", "media", "font"}
+
+    def _trim(text: str | None) -> str:
+        return text.strip() if text else ""
+
+    page.route(
+        "**/*",
+        lambda route: route.abort()
+        if route.request.resource_type in resource_blocklist
+        else route.continue_(),
+    )
+
+    internshala_logger.info("========== INTERNSHALA SCRAPE START ==========")
+    if not _load_until_visible(
+        page,
+        addr,
+        "div.individual_internship",
+        internshala_logger,
+        "Internshala cards",
+        timeout=15000,
+    ):
+        browser.close()
+        return []
+
     jobs = []
+    model_subs = page.locator("div.modal.subscription_alert.new.show")
     if model_subs.is_visible():
-        close = page.locator("#close_popup")
-        close.click()
-    page.wait_for_selector("div.individual_internship", state="visible", timeout=10000)
-    
-    print("--- Scraping Process start ---")
-    internship_block = page.locator("div.internship_list_container")
-    di = internship_block.locator("div")
-    blocks = di.locator("div.container-fluid.individual_internship.view_detail_button.visibilityTrackerItem")
-    block_count = blocks.count()
-    print(f"Found {block_count} blocks")
-    
+        close_btn = model_subs.locator("#close_popup")
+        if close_btn.count() > 0:
+            close_btn.click()
+
+    block_locator = page.locator(
+        "div.container-fluid.individual_internship.view_detail_button.visibilityTrackerItem"
+    )
+    block_count = block_locator.count()
+    internshala_logger.info("Internshala cards found: %s", block_count)
+
     for idx in range(block_count):
-        block = blocks.nth(idx)
-        link = base_url + block.get_attribute("data-href")
-        title = block.locator("h3.job-internship-name").text_content().strip()
-        company = block.locator("p.company-name").text_content().strip()
+        block = block_locator.nth(idx)
+        data_href = block.get_attribute("data-href") or ""
+        link = base_url + data_href
+        title = _trim(block.locator("h3.job-internship-name").text_content())
+        company = _trim(block.locator("p.company-name").text_content())
+
         detail_row = block.locator("div.detail-row-1")
         divs = detail_row.locator("div").all()
-        location = divs[0].text_content().strip()
-        stipend = detail_row.locator("span.stipend").text_content().strip()
-        duration = divs[2].text_content().strip()
-        qualifications = block.locator("div.about_job").text_content().strip()
-        skills = block.locator("div.job_skills").locator("div.skill_container").all()
-        ski = []
+        location = _trim(divs[0].text_content()) if len(divs) > 0 else "Remote"
+        duration = _trim(divs[2].text_content()) if len(divs) > 2 else "Duration not listed"
+        stipend = _trim(detail_row.locator("span.stipend").text_content())
+        qualifications = _trim(block.locator("div.about_job").text_content())
+
+        skill_nodes = block.locator("div.job_skills div.skill_container").all()
+        skills = []
+        for skill in skill_nodes:
+            skill_text = _trim(skill.locator("div.job_skill").text_content())
+            if skill_text:
+                skills.append(skill_text)
 
         detail_row_2 = block.locator("div.detail-row-2")
-        based = detail_row_2.locator("div.gray-labels").locator("div.status-li").all_inner_texts()
+        based = detail_row_2.locator("div.gray-labels div.status-li").all_inner_texts()
+        based_job = based[0].strip() if based else "Schedule not listed"
 
-        for skill in skills:
-            ski.append(skill.locator("div.job_skill").text_content())
-        job = Job(company=company,
-                  title=title,
-                  redirectLink=link,
-                  qualifications=ski,
-                  location=location,
-                  duration=duration,
-                  basedJob=based[0],
-                  experience=qualifications,
-                  stipend=stipend)
+        job = Job(
+            company=company,
+            title=title,
+            redirectLink=link,
+            qualifications=skills,
+            location=location,
+            duration=duration,
+            basedJob=based_job,
+            experience=qualifications,
+            stipend=stipend,
+        )
         jobs.append(job)
-        print(f"id: {idx} | title : {title}")
-    
-    print(f"--- Scraping Complete: {len(jobs)} jobs found ---")
+        internshala_logger.info("[%s/%s] %s @ %s", idx + 1, block_count, title, company)
+
+    internshala_logger.info(
+        "========== INTERNSHALA SCRAPE END | %s jobs ==========", len(jobs)
+    )
     browser.close()
     return jobs
 
@@ -131,11 +249,19 @@ def fetch_naukri(playWirght:Playwright):
     chromium = playWirght.chromium
     browser = chromium.launch(headless=False)
     page = browser.new_page()
-    page.goto(addr)
-    page.wait_for_load_state("networkidle")
-    page.wait_for_selector("div.styles_jlc__main__VdwtF", state="visible", timeout=20000)
+    if not _load_until_visible(
+        page,
+        addr,
+        "div.styles_jlc__main__VdwtF",
+        naukri_logger,
+        "Naukri listings",
+        timeout=20000,
+    ):
+        browser.close()
+        return []
 
     jobs = []
+    naukri_logger.info("========== NAUKRI SCRAPE START ==========")
 
     def _first_text(locator):
         if locator.count() == 0:
@@ -145,7 +271,10 @@ def fetch_naukri(playWirght:Playwright):
 
     job_wrappers = page.locator("div.styles_jlc__main__VdwtF div.srp-jobtuple-wrapper")
     count = job_wrappers.count()
-    print(f"--- Found {count} Naukri cards ---")
+    if count == 0:
+        naukri_logger.warning("Naukri returned 0 job cards; layout may have changed")
+    else:
+        naukri_logger.info("Naukri cards found: %s", count)
 
     for idx in range(count):
         wrapper = job_wrappers.nth(idx)
@@ -186,8 +315,17 @@ def fetch_naukri(playWirght:Playwright):
             stipend=stipend
         )
         jobs.append(job)
-        print(f"[{idx}] {title} @ {company} @ {stipend} @ {experience} @ {duration}")
+        naukri_logger.info(
+            "[%s/%s] %s @ %s | %s | %s",
+            idx + 1,
+            count,
+            title,
+            company,
+            location,
+            stipend,
+        )
 
+    naukri_logger.info("========== NAUKRI SCRAPE END | %s jobs =========", len(jobs))
     browser.close()
     return jobs
 
@@ -198,12 +336,17 @@ def fetch_glassdoor(playwright: Playwright):
     chromium = playwright.chromium
     browser = chromium.launch(headless=False)
     page = browser.new_page()
-    page.goto(addr)
-    try:
-        page.wait_for_load_state("networkidle", timeout=45000)
-    except PlaywrightTimeout:
-        print("[Glassdoor] networkidle wait timed out, continuing with available content")
-    page.wait_for_selector("div#left-column", state="visible", timeout=20000)
+    glassdoor_logger.info("========== GLASSDOOR SCRAPE START ==========")
+    if not _load_until_visible(
+        page,
+        addr,
+        "div#left-column",
+        glassdoor_logger,
+        "Glassdoor listings",
+        timeout=20000,
+    ):
+        browser.close()
+        return []
 
     def _text(locator, default="Not specified"):
         if locator.count() == 0:
@@ -214,7 +357,10 @@ def fetch_glassdoor(playwright: Playwright):
     jobs = []
     job_cards = page.locator("div#left-column li[data-test='jobListing']")
     count = job_cards.count()
-    print(f"--- Found {count} Glassdoor cards ---")
+    if count == 0:
+        glassdoor_logger.warning("Glassdoor returned 0 job cards; selector may be stale")
+    else:
+        glassdoor_logger.info("Glassdoor cards found: %s", count)
 
     for idx in range(count):
         card = job_cards.nth(idx)
@@ -253,5 +399,14 @@ def fetch_glassdoor(playwright: Playwright):
             stipend=stipend or "check source site"
         )
         jobs.append(job)
+        glassdoor_logger.info(
+            "[%s/%s] %s @ %s | %s",
+            idx + 1,
+            count,
+            title,
+            company,
+            location,
+        )
     browser.close()
+    glassdoor_logger.info("========== GLASSDOOR SCRAPE END | %s jobs =========", len(jobs))
     return jobs
