@@ -16,7 +16,7 @@ RUN apt-get update && \
         libxcb1 libxcb-shm0 libxcb-dri3-0 \
         libxext6 libxrender1 libxinerama1 libxcursor1 \
         libxi6 libgtk-3-0 libgdk-pixbuf-2.0-0 \
-        libpangocairo-1.0-0 libpango-1.0-0 \
+        libpangocairo-1.0-0 libpango-1.0-0 libgbm1 \
         fontconfig libfreetype6 libasound2 && \
     rm -rf /var/lib/apt/lists/*
 
