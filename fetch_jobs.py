@@ -31,12 +31,13 @@ def _load_until_visible(
             if attempt > 1:
                 logger.info("%s loaded on attempt %s", label, attempt)
             return True
-        except PlaywrightTimeout:
+        except PlaywrightTimeout as exc:
             logger.warning(
-                "%s attempt %s/%s timed out; retrying",
+                "%s attempt %s/%s timed out (%s); retrying",
                 label,
                 attempt,
                 MAX_LOAD_ATTEMPTS,
+                exc,
             )
         except Exception as exc:  # pylint: disable=broad-except
             logger.warning(
@@ -52,7 +53,7 @@ def _load_until_visible(
 
 
 def fetch_unstop(playwright:Playwright):
-    addr = "https://unstop.com/internships?category=user-experience-ux-design%3Asoftware-development-engineering%3Amachine-learning-ai-engineering%3Adata-engineering-pipelines&oppstatus=open"
+    addr = "https://unstop.com/internships?quickApply=true&usertype=students&domain=2&course=6&specialization=Computer%20Science%20and%20Engineering&passingOutYear=2027&oppstatus=open"
     base_url = "https://unstop.com"
     chromium = playwright.chromium
     browser = chromium.launch(headless=True)
@@ -247,7 +248,7 @@ def fetch_naukri(playWirght:Playwright):
     addr = "https://www.naukri.com/internship-jobs-in-chennai?functionAreaIdGid=3&functionAreaIdGid=5&functionAreaIdGid=8&functionAreaIdGid=15"
     base_url = "https://www.naukri.com"
     chromium = playWirght.chromium
-    browser = chromium.launch(headless=True)
+    browser = chromium.launch(headless=False)
     page = browser.new_page()
     if not _load_until_visible(
         page,
@@ -334,7 +335,7 @@ def fetch_glassdoor(playwright: Playwright):
     addr = "https://www.glassdoor.co.in/Job/bengaluru-india-intern-jobs-SRCH_IL.0,15_IC2940587_KO16,22.htm?sgocId=1007&jobTypeIndeed=VDTG7"
     base_url = "https://www.glassdoor.co.in"
     chromium = playwright.chromium
-    browser = chromium.launch(headless=True)
+    browser = chromium.launch(headless=False)
     page = browser.new_page()
     glassdoor_logger.info("========== GLASSDOOR SCRAPE START ==========")
     if not _load_until_visible(
