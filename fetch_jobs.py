@@ -55,7 +55,7 @@ def fetch_unstop(playwright:Playwright):
     addr = "https://unstop.com/internships?category=user-experience-ux-design%3Asoftware-development-engineering%3Amachine-learning-ai-engineering%3Adata-engineering-pipelines&oppstatus=open"
     base_url = "https://unstop.com"
     chromium = playwright.chromium
-    browser = chromium.launch(headless=False)
+    browser = chromium.launch(headless=True)
     page = browser.new_page()
     if not _load_until_visible(
         page,
@@ -247,7 +247,7 @@ def fetch_naukri(playWirght:Playwright):
     addr = "https://www.naukri.com/internship-jobs-in-chennai?functionAreaIdGid=3&functionAreaIdGid=5&functionAreaIdGid=8&functionAreaIdGid=15"
     base_url = "https://www.naukri.com"
     chromium = playWirght.chromium
-    browser = chromium.launch(headless=False)
+    browser = chromium.launch(headless=True)
     page = browser.new_page()
     if not _load_until_visible(
         page,
@@ -334,7 +334,7 @@ def fetch_glassdoor(playwright: Playwright):
     addr = "https://www.glassdoor.co.in/Job/bengaluru-india-intern-jobs-SRCH_IL.0,15_IC2940587_KO16,22.htm?sgocId=1007&jobTypeIndeed=VDTG7"
     base_url = "https://www.glassdoor.co.in"
     chromium = playwright.chromium
-    browser = chromium.launch(headless=False)
+    browser = chromium.launch(headless=True)
     page = browser.new_page()
     glassdoor_logger.info("========== GLASSDOOR SCRAPE START ==========")
     if not _load_until_visible(
