@@ -13,60 +13,99 @@ glassdoor_logger = logging.getLogger("scraper.glassdoor")
 
 MAX_LOAD_ATTEMPTS = 5
 RETRY_DELAY_SECONDS = 3
+DESKTOP_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
+DEFAULT_VIEWPORT = {"width": 1366, "height": 768}
+CHROMIUM_ARGS = [
+    "--disable-blink-features=AutomationControlled",
+    "--disable-dev-shm-usage",
+    "--no-sandbox",
+]
 
 
-def _load_until_visible(
-    page,
+def _spawn_page(playwright: Playwright, *, engine: str = "chromium"):
+    launcher = getattr(playwright, engine)
+    browser = launcher.launch(headless=True, args=CHROMIUM_ARGS if engine == "chromium" else [])
+    context = browser.new_context(
+        user_agent=DESKTOP_USER_AGENT,
+        viewport=DEFAULT_VIEWPORT,
+        device_scale_factor=1,
+        is_mobile=False,
+        has_touch=False,
+        locale="en-US",
+    )
+    page = context.new_page()
+    return browser, context, page
+
+
+def _get_ready_page(
+    playwright: Playwright,
     url: str,
     selector: str,
     logger: logging.Logger,
     label: str,
     *,
     timeout: int = 20000,
-) -> bool:
-    for attempt in range(1, MAX_LOAD_ATTEMPTS + 1):
-        try:
-            page.goto(url)
-            page.wait_for_selector(selector, state="visible", timeout=timeout)
-            if attempt > 1:
-                logger.info("%s loaded on attempt %s", label, attempt)
-            return True
-        except PlaywrightTimeout as exc:
-            logger.warning(
-                "%s attempt %s/%s timed out (%s); retrying",
-                label,
-                attempt,
-                MAX_LOAD_ATTEMPTS,
-                exc,
-            )
-        except Exception as exc:  # pylint: disable=broad-except
-            logger.warning(
-                "%s attempt %s/%s failed: %s",
-                label,
-                attempt,
-                MAX_LOAD_ATTEMPTS,
-                exc,
-            )
-        time.sleep(RETRY_DELAY_SECONDS)
-    logger.error("Unable to load %s after %s attempts", label, MAX_LOAD_ATTEMPTS)
-    return False
+    configure_page=None,
+):
+    for engine in ("firefox", "chromium"):
+        for attempt in range(1, MAX_LOAD_ATTEMPTS + 1):
+            browser, context, page = _spawn_page(playwright, engine=engine)
+            if configure_page:
+                configure_page(page)
+            try:
+                page.goto(url, wait_until="domcontentloaded")
+                # give JS frameworks time to render + trigger lazy loaders
+                page.wait_for_timeout(2000)
+                page.mouse.wheel(0, 300)
+                page.wait_for_timeout(1000)
+                page.wait_for_selector(selector, state="visible", timeout=timeout)
+                if attempt > 1 or engine != "chromium":
+                    logger.info(
+                        "%s loaded on attempt %s (%s)", label, attempt, engine
+                    )
+                return browser, context, page
+            except PlaywrightTimeout as exc:
+                logger.warning(
+                    "%s [%s] attempt %s/%s timed out (%s); retrying",
+                    label, engine, attempt, MAX_LOAD_ATTEMPTS, exc,
+                )
+            except Exception as exc:  # pylint: disable=broad-except
+                logger.warning(
+                    "%s [%s] attempt %s/%s failed: %s; retrying",
+                    label, engine, attempt, MAX_LOAD_ATTEMPTS, exc,
+                )
+            # clean up broken instance before next attempt
+            try:
+                context.close()
+            except Exception:
+                pass
+            try:
+                browser.close()
+            except Exception:
+                pass
+            time.sleep(RETRY_DELAY_SECONDS)
+        logger.warning(
+            "%s exhausted %s attempts with %s; falling back", label, MAX_LOAD_ATTEMPTS, engine
+        )
+    logger.error("%s could not be loaded with any browser engine", label)
+    return None, None, None
 
 
 def fetch_unstop(playwright:Playwright):
     addr = "https://unstop.com/internships?quickApply=true&usertype=students&domain=2&course=6&specialization=Computer%20Science%20and%20Engineering&passingOutYear=2027&oppstatus=open"
     base_url = "https://unstop.com"
-    chromium = playwright.chromium
-    browser = chromium.launch(headless=True)
-    page = browser.new_page()
-    if not _load_until_visible(
-        page,
+    browser, context, page = _get_ready_page(
+        playwright,
         addr,
         "a.item.position-relative",
         unstop_logger,
         "Unstop job cards",
         timeout=30000,
-    ):
-        browser.close()
+    )
+    if page is None:
         return []
 
     jobs = []  # Store all jobs
@@ -147,7 +186,7 @@ def fetch_unstop(playwright:Playwright):
         unstop_logger.info("- %s @ %s | %s", title, company_name, location)
 
     unstop_logger.info("========== UNSTOP SCRAPE END | %s jobs ==========", len(jobs))
-    page.close()
+    context.close()
     browser.close()
 
     return jobs
@@ -157,33 +196,31 @@ def fetch_unstop(playwright:Playwright):
 def fetch_internshala(playWRight:Playwright):
     addr = "https://internshala.com/internships/work-from-home-ai-agent-development,android-app-development,angular-js-development,artificial-intelligence-ai,backend-development,cloud-computing,computer-science,computer-vision,cyber-security,data-science,web-development,ios-app-development-internships/part-time-true/"
     base_url = "https://internshala.com"
-    chromium = playWRight.chromium
-    browser = chromium.launch(headless=True)
-    page = browser.new_page()
-    page.set_default_timeout(20000)
-
     resource_blocklist = {"image", "media", "font"}
 
     def _trim(text: str | None) -> str:
         return text.strip() if text else ""
 
-    page.route(
-        "**/*",
-        lambda route: route.abort()
-        if route.request.resource_type in resource_blocklist
-        else route.continue_(),
-    )
+    def configure(page):
+        page.set_default_timeout(20000)
+        page.route(
+            "**/*",
+            lambda route: route.abort()
+            if route.request.resource_type in resource_blocklist
+            else route.continue_(),
+        )
 
     internshala_logger.info("========== INTERNSHALA SCRAPE START ==========")
-    if not _load_until_visible(
-        page,
+    browser, context, page = _get_ready_page(
+        playWRight,
         addr,
         "div.individual_internship",
         internshala_logger,
         "Internshala cards",
         timeout=15000,
-    ):
-        browser.close()
+        configure_page=configure,
+    )
+    if page is None:
         return []
 
     jobs = []
@@ -241,24 +278,22 @@ def fetch_internshala(playWRight:Playwright):
     internshala_logger.info(
         "========== INTERNSHALA SCRAPE END | %s jobs ==========", len(jobs)
     )
+    context.close()
     browser.close()
     return jobs
 
 def fetch_naukri(playWirght:Playwright):
-    addr = "https://www.naukri.com/internship-jobs-in-chennai?functionAreaIdGid=3&functionAreaIdGid=5&functionAreaIdGid=8&functionAreaIdGid=15"
+    addr = "https://www.naukri.com/internship-jobs-in-chennai?functionAreaIdGid=3&functionAreaIdGid=5&functionAreaIdGid=15"
     base_url = "https://www.naukri.com"
-    chromium = playWirght.chromium
-    browser = chromium.launch(headless=False)
-    page = browser.new_page()
-    if not _load_until_visible(
-        page,
+    browser, context, page = _get_ready_page(
+        playWirght,
         addr,
         "div.styles_jlc__main__VdwtF",
         naukri_logger,
         "Naukri listings",
         timeout=20000,
-    ):
-        browser.close()
+    )
+    if page is None:
         return []
 
     jobs = []
@@ -327,6 +362,7 @@ def fetch_naukri(playWirght:Playwright):
         )
 
     naukri_logger.info("========== NAUKRI SCRAPE END | %s jobs =========", len(jobs))
+    context.close()
     browser.close()
     return jobs
 
@@ -334,19 +370,16 @@ def fetch_naukri(playWirght:Playwright):
 def fetch_glassdoor(playwright: Playwright):
     addr = "https://www.glassdoor.co.in/Job/bengaluru-india-intern-jobs-SRCH_IL.0,15_IC2940587_KO16,22.htm?sgocId=1007&jobTypeIndeed=VDTG7"
     base_url = "https://www.glassdoor.co.in"
-    chromium = playwright.chromium
-    browser = chromium.launch(headless=False)
-    page = browser.new_page()
     glassdoor_logger.info("========== GLASSDOOR SCRAPE START ==========")
-    if not _load_until_visible(
-        page,
+    browser, context, page = _get_ready_page(
+        playwright,
         addr,
         "div#left-column",
         glassdoor_logger,
         "Glassdoor listings",
         timeout=20000,
-    ):
-        browser.close()
+    )
+    if page is None:
         return []
 
     def _text(locator, default="Not specified"):
@@ -408,6 +441,7 @@ def fetch_glassdoor(playwright: Playwright):
             company,
             location,
         )
+    context.close()
     browser.close()
     glassdoor_logger.info("========== GLASSDOOR SCRAPE END | %s jobs =========", len(jobs))
     return jobs

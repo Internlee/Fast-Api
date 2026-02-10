@@ -22,7 +22,7 @@ RUN apt-get update && \
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt && \
-	python -m playwright install chromium
+	python -m playwright install --with-deps chromium firefox
 
 COPY . .
 
