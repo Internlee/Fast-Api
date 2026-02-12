@@ -171,7 +171,11 @@ def fetch_unstop(playwright:Playwright):
         skills = []
         if skills_text:
             skills = [skill.strip() for skill in skills_text[0].split("\n") if skill.strip()]
-
+        stipend = "check source site"
+        bottom_skill_row = block.locator("div.skill_list.j-between.ng-star-inserted")
+        if(bottom_skill_row.locator("div.cash_container").is_visible()):
+            stipend = bottom_skill_row.locator("div.cash_container").inner_text().split("-")[0].split("/Month")[0]
+        print(stipend)
         job = Job(
             company=company_name,
             title=title,
@@ -181,6 +185,7 @@ def fetch_unstop(playwright:Playwright):
             duration=duration,
             basedJob=clocking,
             experience=experience,
+            stipend=stipend
         )
         jobs.append(job)
         unstop_logger.info("- %s @ %s | %s", title, company_name, location)

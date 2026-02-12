@@ -57,4 +57,4 @@ def fetch_google(playWright: Playwright):
         browser.close()
 
 with sync_playwright() as playwright:
-    fetch_glassdoor(playwright)
+    fetch_unstop(playwright)
